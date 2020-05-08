@@ -170,6 +170,7 @@ typedef struct uavs3e_enc_cfg_t {
 
     //#======= other encoder-size tools ================
     int            adaptive_chroma_dqp;
+	int			   fast_tz;
 } enc_cfg_t;
 
 typedef    void*  (__cdecl *uavs3e_create_t)(enc_cfg_t *param, int *err);

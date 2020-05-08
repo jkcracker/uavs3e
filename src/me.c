@@ -45,6 +45,8 @@
 #define MV_COST64(mv_bits) (lambda_mv * (mv_bits))
 #define MV_COST(mv_bits) (u32)((lambda_mv * mv_bits + (1 << 15)) >> 16)
 
+#define BEST_CANDIDATE_NUM 3
+
 static void avs3_inline com_ipel_range_rounding(s16 mv[MV_D], s32 mvr)
 {
     if (mvr > 2) {
@@ -98,7 +100,6 @@ static void get_raster_range(inter_search_t *pi, int lidx, int refi, s16 center[
     com_assert(range[MV_RANGE_MIN][MV_X] <= range[MV_RANGE_MAX][MV_X]);
     com_assert(range[MV_RANGE_MIN][MV_Y] <= range[MV_RANGE_MAX][MV_Y]);
 }
-
 
 static void search_raster(inter_search_t *pi, int x, int y, int w, int h, s8 refi, int lidx, const s16 mvp[MV_D], s16 mv[MV_D], u64 *cost_best)
 {
@@ -196,7 +197,86 @@ static void search_raster(inter_search_t *pi, int x, int y, int w, int h, s8 ref
     }
 }
 
-static int search_diamond(inter_search_t *pi, int x, int y, int w, int h, s8 refi, int lidx, const s16 mvp[MV_D], s16 mv[MV_D], u64* cost_best, int bi, int max_step)
+static int search_recorded(inter_search_t *pi, int x, int y, int w, int h, s8 refi, int lidx, const s16 mvp[MV_D], s16 mv[MV_D], u64* cost_best, int bi, int model)
+{
+    int bit_depth = pi->bit_depth;
+    int i_org = pi->i_org;
+    pel *org = pi->org;
+    com_pic_t *ref_pic = pi->ref_pic;
+    u8 *tab_mvbits_x = pi->tab_mvbits - (mvp[MV_X] >> pi->curr_mvr);
+    u8 *tab_mvbits_y = pi->tab_mvbits - (mvp[MV_Y] >> pi->curr_mvr);
+    int mvr_idx = pi->curr_mvr;
+    u32 lambda_mv = pi->lambda_mv;
+    int i_ref = ref_pic->stride_luma;
+    pel *ref = ref_pic->y + y * i_ref + x;
+    int shift = 16 - bi - (bit_depth - 8); // sad << 16 for u64 cost
+    const s16 center_x = mv[MV_X];
+    const s16 center_y = mv[MV_Y];
+    const int widx = CONV_LOG2(w) - 2;
+    u64 cost;
+    s16(*mv_best)[2] = pi->mv_diamond_cands[lidx][refi][model];
+    int num_in_range = 0;
+    for (int i = 0; i < 4; i++) {
+        s16 mv_x = mv_best[i][0];
+        s16 mv_y = mv_best[i][1];
+        if (mv_x <= pi->max_mv[MV_X] && mv_x >= pi->min_mv[MV_X] && mv_y <= pi->max_mv[MV_Y] && mv_y >= pi->min_mv[MV_Y]) {
+            cost = ((u64)uavs3e_funs_handle.cost_sad[widx](org, i_org, ref + mv_x + mv_y * i_ref, i_ref, h) << shift)
+                 + (GET_MVBITS_IPEL_X(mv_x) + GET_MVBITS_IPEL_Y(mv_y)) * lambda_mv;
+
+            if (cost < *cost_best) {
+                mv[MV_X] = mv_x;
+                mv[MV_Y] = mv_y;
+                *cost_best = cost;
+            }
+            num_in_range++;
+        }
+    }
+    if (num_in_range) {
+        return COM_MAX(abs(mv[0] - center_x), abs(mv[1] - center_y));
+    } else {
+        return 6; //just a flag
+    }
+}
+
+static int avs3_always_inline insert_candidate(s16 (*mv_list)[2], u64 *cost_list, int max_num, int *num, s16 mvx, s16 mvy, u64 cost)
+{
+    int is_best = 0;
+
+    if (max_num == 1) {
+        if (cost < *cost_list) {
+            (*mv_list)[0] = mvx;
+            (*mv_list)[1] = mvy;
+            *cost_list = cost;
+            is_best = 1;
+        }
+    } else {
+        int i;
+        int cur_num = *num;
+
+        for (i = 0; i < cur_num; i++) {
+            if (cost < cost_list[i]) {
+                break;
+            }
+        }
+        if (i < max_num) {
+            if (i == 0) {
+                is_best = 1;
+            }
+            for (int j = cur_num - 1; j > i; j--) {
+                CP32(&mv_list[j], &mv_list[j - 1]);
+                cost_list[j] = cost_list[j - 1];
+            }
+            mv_list[i][0] = mvx;
+            mv_list[i][1] = mvy;
+            cost_list[i] = cost;
+
+            *num = COM_MIN(cur_num + 1, max_num);
+        }
+    }
+    return is_best;
+}
+
+static int search_diamond(inter_search_t *pi, int x, int y, int w, int h, s8 refi, int lidx, const s16 mvp[MV_D], s16 mv[MV_D], u64* cost_best, int bi, int max_step, int try_skip, int record)
 {
     int best_step      = 0;
     int bit_depth      = pi->bit_depth;
@@ -215,19 +295,25 @@ static int search_diamond(inter_search_t *pi, int x, int y, int w, int h, s8 ref
     const s16 center_x = mv[MV_X];
     const s16 center_y = mv[MV_Y];
     const int widx     = CONV_LOG2(w) - 2;
-    u32 sad;
-    u64 cost;
-	
+    const int max_cand = record ? BEST_CANDIDATE_NUM : 1;
+    s16(*mv_list)[2]   = record ? pi->mv_diamond_cands[lidx][refi][pi->search_type] : (s16(*)[2])mv;
+    u64 cost_list[BEST_CANDIDATE_NUM];
+    int candidates = 0;
+
+    for (int i = 0; i < max_cand; i++) {
+        cost_list[i] = COM_UINT64_MAX;
+    }
+      	
     if (bi) {
         if (pi->curr_mvr > 2) {
             core_size++;
         }
         int ipel_mvp_x = (mvp[0] + 2) >> 2;
         int ipel_mvp_y = (mvp[1] + 2) >> 2;
-        int diff_x = abs(ipel_mvp_x - center_x);
-        int diff_y = abs(ipel_mvp_y - center_y);
-        int diff = COM_MAX(diff_x, diff_y) >> COM_MAX(0, pi->curr_mvr - 2);
-        core_size = COM_CLIP3(2, core_size, diff);
+        int diff_x     = abs(ipel_mvp_x - center_x);
+        int diff_y     = abs(ipel_mvp_y - center_y);
+        int diff       = COM_MAX(diff_x, diff_y) >> COM_MAX(0, pi->curr_mvr - 2);
+        core_size      = COM_CLIP3(2, core_size, diff);
     }
     if (pi->curr_mvr > 2) {
         core_size <<= (pi->curr_mvr - 2);
@@ -245,16 +331,14 @@ static int search_diamond(inter_search_t *pi, int x, int y, int w, int h, s8 ref
     while (max_cmv_y >= pi->max_mv[MV_Y]) max_cmv_y -= core_step;
 
     /* 1. try center pointer first */
-    pel *p = ref + center_y * i_ref + center_x;
+    com_assert(center_x <= pi->max_mv[MV_X] && center_x >= pi->min_mv[MV_X] && center_y <= pi->max_mv[MV_Y] && center_y >= pi->min_mv[MV_Y]);
 
-    sad = uavs3e_funs_handle.cost_sad[widx](org, i_org, p, i_ref, h);
-    cost = ((u64)sad << shift) + (GET_MVBITS_IPEL_Y(center_y) + GET_MVBITS_IPEL_X(center_x)) * lambda_mv;
-
-    if (cost < *cost_best) {
-        mv[MV_X] = center_x;
-        mv[MV_Y] = center_y;
-        best_step = 0;
-        *cost_best = cost;
+    if (*cost_best == COM_UINT64_MAX) {
+        u32 sad = uavs3e_funs_handle.cost_sad[widx](org, i_org, ref + center_y * i_ref + center_x, i_ref, h);
+        u64 cost = ((u64)sad << shift) + (GET_MVBITS_IPEL_Y(center_y) + GET_MVBITS_IPEL_X(center_x)) * lambda_mv;
+        insert_candidate(mv_list, cost_list, max_cand, &candidates, mv[0], mv[1], cost);
+    } else {
+        insert_candidate(mv_list, cost_list, max_cand, &candidates, mv[0], mv[1], *cost_best);
     }
 
     /* 2. try core squre */
@@ -274,51 +358,84 @@ static int search_diamond(inter_search_t *pi, int x, int y, int w, int h, s8 ref
             pel *p = ref + mv_y * i_ref;
             s16 mv_x = min_cmv_x;
             u32 sad_x4[4];
-            s64 tmp_best = *cost_best - cost_mvy;
-
             pcmvx = cost_mvx;
 
             for (; mv_x <= max_cmv_x_x4; mv_x += core_step_x4) {
                 pel *p0 = p + mv_x;
                 uavs3e_funs_handle.cost_sad_x4[widx](org, i_org, p0, p0 + core_step, p0 + core_step_x2, p0 + core_step_x3, i_ref, sad_x4, h);
-                s64 cost0 = (*pcmvx++) + ((s64)sad_x4[0] << shift);
-                s64 cost1 = (*pcmvx++) + ((s64)sad_x4[1] << shift);
-                s64 cost2 = (*pcmvx++) + ((s64)sad_x4[2] << shift);
-                s64 cost3 = (*pcmvx++) + ((s64)sad_x4[3] << shift);
-                if (cost0 < tmp_best) { mv[0] = mv_x, mv[1] = mv_y, tmp_best = cost0; }
-                if (cost1 < tmp_best) { mv[0] = mv_x + core_step, mv[1] = mv_y, tmp_best = cost1; }
-                if (cost2 < tmp_best) { mv[0] = mv_x + core_step_x2, mv[1] = mv_y, tmp_best = cost2; }
-                if (cost3 < tmp_best) { mv[0] = mv_x + core_step_x3, mv[1] = mv_y, tmp_best = cost3; }
+                u64 cost0 = (*pcmvx++) + ((u64)sad_x4[0] << shift) + cost_mvy;
+                u64 cost1 = (*pcmvx++) + ((u64)sad_x4[1] << shift) + cost_mvy;
+                u64 cost2 = (*pcmvx++) + ((u64)sad_x4[2] << shift) + cost_mvy;
+                u64 cost3 = (*pcmvx++) + ((u64)sad_x4[3] << shift) + cost_mvy;
+
+                if (max_cand == 1) {
+                    if (cost0 < cost_list[0]) { mv[0] = mv_x,                mv[1] = mv_y, cost_list[0] = cost0; }
+                    if (cost1 < cost_list[0]) { mv[0] = mv_x + core_step,    mv[1] = mv_y, cost_list[0] = cost1; }
+                    if (cost2 < cost_list[0]) { mv[0] = mv_x + core_step_x2, mv[1] = mv_y, cost_list[0] = cost2; }
+                    if (cost3 < cost_list[0]) { mv[0] = mv_x + core_step_x3, mv[1] = mv_y, cost_list[0] = cost3; }
+                } else {
+                    insert_candidate(mv_list, cost_list, max_cand, &candidates, mv_x,                mv_y, cost0);
+                    insert_candidate(mv_list, cost_list, max_cand, &candidates, mv_x + core_step,    mv_y, cost1);
+                    insert_candidate(mv_list, cost_list, max_cand, &candidates, mv_x + core_step_x2, mv_y, cost2);
+                    insert_candidate(mv_list, cost_list, max_cand, &candidates, mv_x + core_step_x3, mv_y, cost3);
+                }
             }
             if (mv_x + 2 * core_step <= max_cmv_x) {
                 pel *p0 = p + mv_x;
                 uavs3e_funs_handle.cost_sad_x3[widx](org, i_org, p0, p0 + core_step, p0 + core_step_x2, i_ref, sad_x4, h);
-                s64 cost0 = (*pcmvx++) + ((s64)sad_x4[0] << shift);
-                s64 cost1 = (*pcmvx++) + ((s64)sad_x4[1] << shift);
-                s64 cost2 = (*pcmvx++) + ((s64)sad_x4[2] << shift);
-                if (cost0 < tmp_best) { mv[0] = mv_x, mv[1] = mv_y, tmp_best = cost0; }
-                if (cost1 < tmp_best) { mv[0] = mv_x + core_step, mv[1] = mv_y, tmp_best = cost1; }
-                if (cost2 < tmp_best) { mv[0] = mv_x + core_step_x2, mv[1] = mv_y, tmp_best = cost2; }
-                mv_x  += 3 * core_step;
+                u64 cost0 = (*pcmvx++) + ((u64)sad_x4[0] << shift) + cost_mvy;
+                u64 cost1 = (*pcmvx++) + ((u64)sad_x4[1] << shift) + cost_mvy;
+                u64 cost2 = (*pcmvx++) + ((u64)sad_x4[2] << shift) + cost_mvy;
+
+                if (max_cand == 1) {
+                    if (cost0 < cost_list[0]) { mv[0] = mv_x,                mv[1] = mv_y, cost_list[0] = cost0; }
+                    if (cost1 < cost_list[0]) { mv[0] = mv_x + core_step,    mv[1] = mv_y, cost_list[0] = cost1; }
+                    if (cost2 < cost_list[0]) { mv[0] = mv_x + core_step_x2, mv[1] = mv_y, cost_list[0] = cost2; }
+                } else {
+                    insert_candidate(mv_list, cost_list, max_cand, &candidates, mv_x,                mv_y, cost0);
+                    insert_candidate(mv_list, cost_list, max_cand, &candidates, mv_x + core_step,    mv_y, cost1);
+                    insert_candidate(mv_list, cost_list, max_cand, &candidates, mv_x + core_step_x2, mv_y, cost2);
+                }
+                mv_x += 3 * core_step;
             }
             for (; mv_x <= max_cmv_x; mv_x += core_step) {
-                cost = (*pcmvx++) + ((u64)(uavs3e_funs_handle.cost_sad[widx](org, i_org, p + mv_x, i_ref, h)) << shift);
-                if ((s64)cost < tmp_best) { mv[0] = mv_x; mv[1] = mv_y; tmp_best = cost; }
+                u64 cost = (*pcmvx++) + ((u64)(uavs3e_funs_handle.cost_sad[widx](org, i_org, p + mv_x, i_ref, h)) << shift) + cost_mvy;
+                insert_candidate(mv_list, cost_list, max_cand, &candidates, mv_x, mv_y, cost);
             }
-
-            *cost_best = tmp_best + cost_mvy;
         }
     }
+    CP32(mv, mv_list[0]);
+    *cost_best = cost_list[0];
 
     if (mv[0] != center_x || mv[1] != center_y) {
         best_step = 2;
     }
-
     if (bi) {
         return best_step;
     }
-
     /* 3. try multilayer diamond */
+    if (!bi && try_skip) { // delete one ring
+        s16 mv_assign_weight[MV_D];
+        s16(*ipel_best_mv)[2] = pi->ipel_mv_amvr[lidx][refi];
+
+        if (pi->curr_mvr <= 2) {
+            mv_assign_weight[0] = pi->ipel_mv_amvr[lidx][refi][0][0];
+            mv_assign_weight[1] = pi->ipel_mv_amvr[lidx][refi][0][1];
+        } else if (pi->curr_mvr == 3) {
+            mv_assign_weight[0] = (ipel_best_mv[0][0] + ipel_best_mv[1][0] + 2 * ipel_best_mv[2][0]) >> 2;
+            mv_assign_weight[1] = (ipel_best_mv[0][1] + ipel_best_mv[1][1] + 2 * ipel_best_mv[2][1]) >> 2;
+        } else if (pi->curr_mvr == 4) {
+            mv_assign_weight[0] = (ipel_best_mv[0][0] + ipel_best_mv[1][0] + 2 * ipel_best_mv[2][0] + 4 * ipel_best_mv[3][0]) >> 3;
+            mv_assign_weight[1] = (ipel_best_mv[0][1] + ipel_best_mv[1][1] + 2 * ipel_best_mv[2][1] + 4 * ipel_best_mv[3][1]) >> 3;
+        }
+        int offcet = (pi->curr_mvr <= 2) ? 6 : 4;
+        int distance = abs(mv_assign_weight[0] - center_x) + abs(mv_assign_weight[1] - center_y);
+
+        if (distance <= offcet * core_step) {
+            max_step = 16;
+        }
+    }
+
     int mvr_scale = COM_MAX(pi->curr_mvr - 2, 0);
 
     for (int step = 4, round = 0; step < max_step; step <<= 1, round++) {
@@ -336,20 +453,19 @@ static int search_diamond(inter_search_t *pi, int x, int y, int w, int h, s8 ref
             s16 mv_x = center_x + ((s16)(step_scale >> search_idx) * tbl_diapos_partial[search_idx][i][MV_X]);
             s16 mv_y = center_y + ((s16)(step_scale >> search_idx) * tbl_diapos_partial[search_idx][i][MV_Y]);
 
-            if (mv_x <= pi->max_mv[MV_X] && mv_x >= pi->min_mv[MV_X] &&
-                mv_y <= pi->max_mv[MV_Y] && mv_y >= pi->min_mv[MV_Y]) {
+            if (mv_x <= pi->max_mv[MV_X] && mv_x >= pi->min_mv[MV_X] && mv_y <= pi->max_mv[MV_Y] && mv_y >= pi->min_mv[MV_Y]) {
+
                 u64 cost = ((u64)uavs3e_funs_handle.cost_sad[widx](org, i_org, ref + mv_x + mv_y * i_ref, i_ref, h) << shift)
                          + (GET_MVBITS_IPEL_X(mv_x) + GET_MVBITS_IPEL_Y(mv_y)) * lambda_mv;
 
-                if (cost < *cost_best) {
-                    mv[MV_X] = mv_x;
-                    mv[MV_Y] = mv_y;
+                if (insert_candidate(mv_list, cost_list, max_cand, &candidates, mv_x, mv_y, cost)) {
                     best_step = step;
-                    *cost_best = cost;
                 }
             }
         }
     }
+    CP32(mv, mv_list[0]);
+    *cost_best = cost_list[0];
 
     return best_step;
 }
@@ -514,35 +630,84 @@ u64 me_search_tz(inter_search_t *pi, int x, int y, int w, int h, int pic_width, 
     if (!bi) {
         CP32(mv, mvp);
     }
-
     com_mv_mvr_check(mv, pi->curr_mvr);
 
     mv[MV_X] = COM_CLIP3(pi->min_mv[MV_X], pi->max_mv[MV_X], (mv[MV_X] + 2) >> 2);
     mv[MV_Y] = COM_CLIP3(pi->min_mv[MV_Y], pi->max_mv[MV_Y], (mv[MV_Y] + 2) >> 2);
 
     u64 cost_best = COM_UINT64_MAX;
-    int best_step = search_diamond(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best, bi, MAX_FIRST_SEARCH_STEP);
+    int best_step = 0;
 
-    if (!bi && (abs(mvp[MV_X] - (mv[MV_X] << 2)) > 2 || abs(mvp[MV_Y] - (mv[MV_Y] << 2)) > 2)) {
-        if (best_step > RASTER_SEARCH_THD) {
-            search_raster(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best);
+    if (pi->search_type == ME_FAST_AMVR) {
+        pi->record_amvr[lidx][refi][bi][pi->curr_mvr] = 1;
+        CP32(pi->ipel_start_mv[lidx][refi][ME_FAST_AMVR][bi][pi->curr_mvr], mv);
+
+        if (!bi && pi->curr_mvr == 0) {
+            best_step = search_diamond(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best, bi, MAX_FIRST_SEARCH_STEP, 0, 1);/* record the 3 best mv of the first diamond*/
+        } else if (!bi && pi->curr_mvr <= 2) {
+            best_step = search_recorded(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best, bi, ME_FAST_AMVR);/* search the 3 best mv of the first diamond and the best ipel_mv of first curr_mvr*/
+        } else {
+            best_step = search_diamond(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best, bi, MAX_FIRST_SEARCH_STEP, 1, 0);/* may decline the ring number of diamond */
         }
-        search_diamond(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best, bi, MAX_REFINE_SEARCH_STEP);
+    } else if (pi->search_type == ME_FAST_EMVR) {
+        s16 *start_mv_amvr = pi->ipel_start_mv[lidx][refi][ME_FAST_AMVR][bi][pi->curr_mvr];
+        s16 *start_mv_emvr = pi->ipel_start_mv[lidx][refi][ME_FAST_EMVR][bi][0];
+        int diff_x_amvr = COM_ABS(mv[0] - start_mv_amvr[0]);
+        int diff_y_amvr = COM_ABS(mv[1] - start_mv_amvr[1]);
+        int diff_x_emvr = (pi->record_emvr[lidx][refi]) ? COM_ABS(mv[0] - start_mv_emvr[0]) : COM_INT_MAX;
+        int diff_y_emvr = (pi->record_emvr[lidx][refi]) ? COM_ABS(mv[1] - start_mv_emvr[1]) : COM_INT_MAX;
+
+        if (pi->record_amvr[lidx][refi][bi][pi->curr_mvr] && diff_x_amvr <= 4 && diff_y_amvr <= 4) {
+            CP32(mv, pi->mv_result_amvr[lidx][refi][bi][pi->curr_mvr]);
+            cost_best = pi->cost_result_amvr[lidx][refi][bi][pi->curr_mvr];
+            if (!bi) {
+                CP32(pi->mv_ipel[lidx][refi], pi->ipel_mv_amvr[lidx][refi][pi->curr_mvr]);
+            }
+            com_mv_mvr_check(mv, pi->curr_mvr);
+            return (u32)((cost_best + (1 << 15)) >> 16);
+        }
+        if (!bi && pi->curr_mvr == 0) {
+            pi->record_emvr[lidx][refi] = 1;
+            CP32(start_mv_emvr, mv);
+            best_step = search_diamond(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best, bi, MAX_FIRST_SEARCH_STEP, 0, 1);
+        } else if(!bi && pi->curr_mvr <= 2 && ((diff_x_emvr <= 2 && diff_y_emvr <= 2) || (diff_x_amvr <= 2 && diff_y_amvr <= 2))) {
+            int model = (diff_x_amvr + diff_y_amvr <= diff_x_emvr + diff_y_emvr) ? ME_FAST_AMVR : ME_FAST_EMVR; /*choose the model whose start mv is closer*/
+            best_step = search_recorded(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best, bi, model);
+        } else {
+            best_step = search_diamond(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best, bi, MAX_FIRST_SEARCH_STEP, 1, 0);
+        }
+    } else {
+        best_step = search_diamond(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best, bi, MAX_FIRST_SEARCH_STEP, 0, 0);
     }
     if (!bi) {
+        if (abs(mvp[MV_X] - (mv[MV_X] << 2)) > 2 || abs(mvp[MV_Y] - (mv[MV_Y] << 2)) > 2 || cost_best == COM_UINT64_MAX) {
+            if (best_step > RASTER_SEARCH_THD) {
+                search_raster(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best);
+            }
+            search_diamond(pi, x, y, w, h, refi, lidx, mvp, mv, &cost_best, bi, MAX_REFINE_SEARCH_STEP, 0, 0);
+        }
+        if (pi->search_type == ME_FAST_AMVR) {
+            CP32(pi->ipel_mv_amvr[lidx][refi][pi->curr_mvr], mv);
+        }
+        if (pi->curr_mvr == 0) {
+            CP32(pi->mv_diamond_cands[lidx][refi][pi->search_type][3], mv);
+        }
         CP32(pi->mv_ipel[lidx][refi], mv);
     }
     mv[0] <<= 2, mv[1] <<= 2;
 
     if (pi->curr_mvr < 2) {
-        cost_best = me_sub_pel_search(pi, x, y, w, h,  refi, lidx, mvp, mv, bi); // this cost is satd
+        cost_best = me_sub_pel_search(pi, x, y, w, h, refi, lidx, mvp, mv, bi); // this cost is satd
     }
-    int extra_bits = tbl_refi_bits[pi->num_refp][refi] + pi->curr_mvr + (pi->curr_mvr < MAX_NUM_MVR - 1) +
-                    (bi ? pi->mot_bits[(lidx == REFP_0) ? REFP_1 : REFP_0] + 1 : 2);
+    int extra_bits = tbl_refi_bits[pi->num_refp][refi] + pi->curr_mvr + (pi->curr_mvr < MAX_NUM_MVR - 1)
+                   + (bi ? pi->mot_bits[(lidx == REFP_0) ? REFP_1 : REFP_0] + 1 : 2);
 
     cost_best += pi->lambda_mv * (extra_bits);
 
+    if (pi->search_type == ME_FAST_AMVR) {
+        pi->cost_result_amvr[lidx][refi][bi][pi->curr_mvr] = cost_best;
+        CP32(pi->mv_result_amvr[lidx][refi][bi][pi->curr_mvr], mv);
+    }
     com_mv_mvr_check(mv, pi->curr_mvr);
-
     return (u32)((cost_best + (1 << 15)) >> 16);
 }

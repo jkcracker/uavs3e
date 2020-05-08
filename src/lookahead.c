@@ -108,11 +108,12 @@ double loka_estimate_coding_cost(inter_search_t *pi, com_img_t *img_org, com_img
 
     pic.subpel = &subpel;
 
-    pi->ptr       = img_org->ptr;
-    pi->curr_mvr  = 2;
-    pi->lambda_mv = (u32)floor(65536.0 * sqrt(base_lambda));
-    pi->i_org     = i_org;
-    pi->fast_me   = 0;
+    pi->ptr         = img_org->ptr;
+    pi->curr_mvr    = 2;
+    pi->lambda_mv   = (u32)floor(65536.0 * sqrt(base_lambda));
+    pi->i_org       = i_org;
+    pi->fast_me     = 0;
+    pi->search_type = ME_NORMAL;
 
 #define WRITE_REC_PIC 0
 

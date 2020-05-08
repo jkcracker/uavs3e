@@ -68,6 +68,10 @@
 #define MAX_D_COST                (1.7e+308)
 #define MAX_D_COST_EXT            (MAX_D_COST * 0.999999999)
 
+#define ME_NORMAL         -1
+#define ME_FAST_AMVR       0
+#define ME_FAST_EMVR       1
+
 /*****************************************************************************
  * input picture buffer structure
  *****************************************************************************/
@@ -116,12 +120,22 @@ typedef struct uavs3e_enc_inter_data_t {
     int  i_org;
     u32  lambda_mv;
 
+    int  search_type; 
+
     s32  mot_bits         [REFP_NUM];
     s16  mvp_scale        [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][MV_D];
     s16  mv_scale         [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][MV_D];
     s16  mv_ipel          [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][MV_D];
 
-    u32  hpel_satd        [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][9];
+	s16  mv_diamond_cands [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][2][4][MV_D];			/* the best four mv of the first diamond search in amvr model */
+	s16  ipel_start_mv    [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][2][BI_NUM][5][MV_D];	/* the start mv of first accuracy */
+	s16  ipel_mv_amvr     [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][5][MV_D];			/* the best integer pixel mv of all accuracies in amvr model */	
+	u8   record_amvr      [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][2][5];					/* 1 : means that this curr_mvr in amvr model is searched */
+	u8   record_emvr      [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME];						/* 1 : means that the first curr_mvr in emvr model is searched */  //º«µ√«Â¡„
+	s16  mv_result_amvr	  [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][BI_NUM][5][MV_D];	/* the finally mv  of complete tz_search in amvr model */
+	u64  cost_result_amvr [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][BI_NUM][5];			/* the  finally cost of complete tz_search in amvr model*/
+
+	u32  hpel_satd        [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][9];
     s16  hpel_start_mv    [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][MV_D];
     u32  qpel_satd        [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][9];
     s16  qpel_start_mv    [REFP_NUM][MAX_NUM_ACTIVE_REF_FRAME][MV_D];

@@ -826,7 +826,6 @@ static void analyze_uni_pred(core_t *core, lbac_t *lbac_best, double *cost_L0L1,
 
     pi->i_org   = core->pic_org->stride_luma;
     pi->org     = core->pic_org->y + y * pi->i_org + x;
-    pi->fast_me = core->param->speed_level;
 
     cur_info->cu_mode = MODE_INTER;
 
@@ -920,7 +919,6 @@ static void analyze_bi(core_t *core, lbac_t *lbac_best, s16 mv_L0L1[REFP_NUM][MV
         ALIGNED_32(pel org_bi[MAX_CU_DIM]);
         pi->i_org = cu_width;
         pi->org = org_bi;
-        pi->fast_me = 0;
 
         com_mc_cu(x, y, info->pic_width, info->pic_height, cu_width, cu_height, refi, cur_info->mv, core->refp, pred, cu_width, CHANNEL_L, bit_depth);
         create_bi_org(org, pred[0], pic_org->stride_luma, cu_width, cu_height, org_bi, cu_width, info->bit_depth_internal);
@@ -1696,10 +1694,19 @@ void analyze_inter_cu(core_t *core, lbac_t *lbac_best)
         analyze_direct_skip(core, lbac_best);
     }
 
-    memset(pi->hpel_satd, 0, sizeof(pi->hpel_satd));
-    memset(pi->qpel_satd, 0, sizeof(pi->qpel_satd));
+    memset(pi->hpel_satd,   0, sizeof(pi->hpel_satd  ));
+    memset(pi->qpel_satd,   0, sizeof(pi->qpel_satd  ));
+	memset(pi->record_emvr, 0, sizeof(pi->record_emvr));
+	memset(pi->record_amvr, 0, sizeof(pi->record_amvr));
+
+    pi->fast_me = core->param->speed_level;
 
     for (cur_info->hmvp_flag = 0; cur_info->hmvp_flag < num_iter_mvp; cur_info->hmvp_flag++) {
+        if (pi->fast_me) {
+            pi->search_type = cur_info->hmvp_flag ? ME_FAST_EMVR : ME_FAST_AMVR;
+        } else {
+            pi->search_type = ME_NORMAL;
+        }
         if (cur_info->hmvp_flag) {
             num_amvr = 0;
             if (info->sqh.emvr_enable) { 

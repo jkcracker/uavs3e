@@ -222,6 +222,7 @@ typedef enum uavs3e_pred_direction {
 #define MV_X                               0
 #define MV_Y                               1
 #define MV_D                               2
+#define BI_NUM                             2
 
 #define CPMV_BIT_DEPTH                     18
 #define COM_CPMV_MAX                       ((s32)((1<<(CPMV_BIT_DEPTH - 1)) - 1))
