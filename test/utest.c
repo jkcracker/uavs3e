@@ -212,6 +212,24 @@ static app_cfg_t options[] = {
         ,0
     },
     {
+		CFG_KEY_NULL,  "use_ref_block_aq", CFG_TYPE_INTEGER,
+		&cfg.use_ref_block_aq,
+		"use_ref_block_aq"
+		,0
+    },
+	{
+		CFG_KEY_NULL,  "use_ref_block_aq_alpha", CFG_TYPE_INTEGER,
+		&cfg.use_ref_block_aq_alpha,
+		"use_ref_block_aq_alpha"
+		,0
+	},
+	{
+		CFG_KEY_NULL,  "use_ref_block_aq_beta", CFG_TYPE_INTEGER,
+		&cfg.use_ref_block_aq_beta,
+		"use_ref_block_aq_beta"
+		,0
+	},
+    {
         CFG_KEY_NULL,  "qp_offset_cb", CFG_TYPE_INTEGER,
         &cfg.qp_offset_cb,
         "qp offset for cb, disable:0 (default)"
@@ -898,7 +916,9 @@ static void print_config(void *h, enc_cfg_t param)
     printf("\n");
 
     //encoder-side tools
-    printf("\tENC-Side Tools: adaptive_chroma_qp(%d) ", param.adaptive_chroma_dqp);
+    printf("\tENC-Side Tools: adaptive_chroma_qp(%d)\n", param.adaptive_chroma_dqp);
+	printf("\tENC-Side Tools: use_ref_block_aq(%d) alpha %d beta %d", param.use_ref_block_aq, param.use_ref_block_aq_alpha, param.use_ref_block_aq_beta);
+
     printf("\n");
 
     //speed-up tools
