@@ -85,6 +85,9 @@ com_img_t *com_img_create(int width, int height, int pad[MAX_PLANES], int planes
     }
     img->num_planes = planes;
 
+	for (int i = 0; i < 2; i++)
+		img->list[i] = NULL;
+
     com_img_addref(img);
 
     return img;

@@ -302,24 +302,24 @@ static void update_last_ip(enc_ctrl_t *h, com_img_t *img, int type)
     }
 }
 
-static void push_sub_gop(enc_ctrl_t *h, int start, int num, int level)
+static void push_sub_gop(enc_ctrl_t *h, int start, int num, int level , com_img_t* list0, com_img_t* list1)
 {
     if (num <= 2) {
         if (start < h->img_rsize) {
-            add_input_node(h, h->img_rlist[start].img, 0, level, SLICE_B);
+            add_input_node(h, h->img_rlist[start].img, 0, level, SLICE_B,list0,list1);
 
             if (num == 2 && start + 1 < h->img_rsize) {
-                add_input_node(h, h->img_rlist[start + 1].img, 0, level, SLICE_B);
+                add_input_node(h, h->img_rlist[start + 1].img, 0, level, SLICE_B,list0,list1);
             }
         }
     } else {
         int idx = start + num / 2;
 
         if (idx < h->img_rsize) {
-            add_input_node(h, h->img_rlist[idx].img, 1, level, SLICE_B);
+            add_input_node(h, h->img_rlist[idx].img, 1, level, SLICE_B, list0, list1);
         }
-        push_sub_gop(h, start, num / 2, level + 1);
-        push_sub_gop(h, idx + 1,  num - num / 2 - 1, level + 1);
+        push_sub_gop(h, start, num / 2, level + 1,list0, h->img_rlist[idx].img);
+        push_sub_gop(h, idx + 1,  num - num / 2 - 1, level + 1, h->img_rlist[idx].img,list1);
     }
 }
 
@@ -334,15 +334,20 @@ void loka_slicetype_decision(enc_ctrl_t *h)
 
     cur_ip_idx = COM_MIN(cur_ip_idx, next_ifrm_idx);
 
+	com_img_t *list0 = h->img_lastIP;
+	com_img_t *list1 = NULL;
+
     for (int i = 0; i < cur_ip_idx; i++) { 
         if (h->img_rlist[i].insert_idr) { // insert user-defined IDR frame
             if (i > 0) {
-                add_input_node(h, h->img_rlist[i - 1].img, 1, FRM_DEPTH_1, SLICE_B);
+                add_input_node(h, h->img_rlist[i - 1].img, 1, FRM_DEPTH_1, SLICE_B,list0,list1);
                 if (i > 1) {
-                    push_sub_gop(h, 0, i - 1, FRM_DEPTH_2);
+					if(h->cfg.use_ref_block_aq)
+						list1 = h->img_rlist[i].img;
+                    push_sub_gop(h, 0, i - 1, FRM_DEPTH_2,list0,list1);
                 }
             }
-            add_input_node(h, h->img_rlist[i].img, 1, FRM_DEPTH_0, SLICE_I);
+            add_input_node(h, h->img_rlist[i].img, 1, FRM_DEPTH_0, SLICE_I,NULL,NULL);
             update_last_ip(h, h->img_rlist[i].img, SLICE_I);
             shift_reorder_list(h, i);
             return;
@@ -362,7 +367,7 @@ void loka_slicetype_decision(enc_ctrl_t *h)
                 cur_ip_idx--;
             }
             if (cur_ip_idx == 0) {
-                add_input_node(h, h->img_rlist[cur_ip_idx].img, 1, FRM_DEPTH_0, SLICE_I);
+                add_input_node(h, h->img_rlist[cur_ip_idx].img, 1, FRM_DEPTH_0, SLICE_I,NULL,NULL);
                 shift_reorder_list(h, cur_ip_idx);
                 return;
             }
@@ -421,30 +426,38 @@ void loka_slicetype_decision(enc_ctrl_t *h)
     if (is_ifrm) { // insert I frame
         if (h->cfg.close_gop) {
             if (cur_ip_idx > 0) {
-                add_input_node(h, h->img_rlist[cur_ip_idx - 1].img, 1, FRM_DEPTH_1, SLICE_B);
+                add_input_node(h, h->img_rlist[cur_ip_idx - 1].img, 1, FRM_DEPTH_1, SLICE_B, list0, list1);
                 if (cur_ip_idx > 1) {
-                    push_sub_gop(h, 0, cur_ip_idx - 1, FRM_DEPTH_2);
+					if (h->cfg.use_ref_block_aq)
+						list1 = h->img_rlist[cur_ip_idx].img;
+                    push_sub_gop(h, 0, cur_ip_idx - 1, FRM_DEPTH_2, list0, list1);
                 }
             }
-            add_input_node(h, h->img_rlist[cur_ip_idx].img, 1, FRM_DEPTH_0, SLICE_I);
+            add_input_node(h, h->img_rlist[cur_ip_idx].img, 1, FRM_DEPTH_0, SLICE_I,NULL,NULL);
             update_last_ip(h, h->img_rlist[cur_ip_idx].img, SLICE_I);
         } else {
-            add_input_node(h, h->img_rlist[cur_ip_idx].img, 1, FRM_DEPTH_0, SLICE_I);
+            add_input_node(h, h->img_rlist[cur_ip_idx].img, 1, FRM_DEPTH_0, SLICE_I,NULL,NULL);
             update_last_ip(h, h->img_rlist[cur_ip_idx].img, SLICE_I);
 
             if (cur_ip_idx > 0) {
-                push_sub_gop(h, 0, cur_ip_idx, FRM_DEPTH_2);
+				if (h->cfg.use_ref_block_aq)
+					list1 = h->img_rlist[cur_ip_idx].img;
+                push_sub_gop(h, 0, cur_ip_idx, FRM_DEPTH_2, list0, list1);
             }
         }
     } else {
         if (cur_ip_idx == h->img_rsize - 1 && h->img_rsize <= h->cfg.max_b_frames) { // flush
-            push_sub_gop(h, 0, h->cfg.max_b_frames, FRM_DEPTH_2);
+			if (h->cfg.use_ref_block_aq)
+				list1 = h->img_rlist[h->cfg.max_b_frames].img;
+            push_sub_gop(h, 0, h->cfg.max_b_frames, FRM_DEPTH_2, list0, list1);
         } else {
-            add_input_node(h, h->img_rlist[cur_ip_idx].img, 1, FRM_DEPTH_1, SLICE_B);
+            add_input_node(h, h->img_rlist[cur_ip_idx].img, 1, FRM_DEPTH_1, SLICE_B, list0, list1);
             update_last_ip(h, h->img_rlist[cur_ip_idx].img, SLICE_B);
 
             if (cur_ip_idx > 0) {
-                push_sub_gop(h, 0, cur_ip_idx, FRM_DEPTH_2);
+				if (h->cfg.use_ref_block_aq)
+					list1 = h->img_rlist[cur_ip_idx].img;
+                push_sub_gop(h, 0, cur_ip_idx, FRM_DEPTH_2, list0, list1);
             }
         }
     }

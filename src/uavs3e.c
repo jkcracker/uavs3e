@@ -1159,25 +1159,25 @@ static void enc_push_frm(enc_ctrl_t *h, com_img_t *img, int insert_idr)
     com_img_addref(img);
 
     if (h->cfg.i_period == 1) { // AI
-        add_input_node(h, img, 1, FRM_DEPTH_0, SLICE_I);
+        add_input_node(h, img, 1, FRM_DEPTH_0, SLICE_I,NULL,NULL);
         h->lastI_ptr = img->ptr;
         return;
     }
     if (h->info.sqh.low_delay) { // LD
         if (h->lastI_ptr == -1 || insert_idr || (h->cfg.i_period && img->ptr - h->lastI_ptr == h->cfg.i_period)) {
-            add_input_node(h, img, 1, FRM_DEPTH_0, SLICE_I);
+            add_input_node(h, img, 1, FRM_DEPTH_0, SLICE_I, NULL, NULL);
             h->lastI_ptr = img->ptr;
         } else {
             static tab_s8 tbl_slice_depth_P[4] = { FRM_DEPTH_3,  FRM_DEPTH_2, FRM_DEPTH_3, FRM_DEPTH_1 };
             int frm_depth = tbl_slice_depth_P[(img->ptr - h->lastI_ptr - 1) % 4];
-            add_input_node(h, img, 1, frm_depth, SLICE_B);
+            add_input_node(h, img, 1, frm_depth, SLICE_B, NULL, NULL);
         }
         return;
     }
 
     /*** RA ***/
     if (h->lastI_ptr == -1) { // First frame
-        add_input_node(h, img, 1, FRM_DEPTH_0, SLICE_I);
+        add_input_node(h, img, 1, FRM_DEPTH_0, SLICE_I, NULL, NULL);
         h->lastI_ptr = img->ptr;
         h->img_lastIP = img;
         com_img_addref(img);
