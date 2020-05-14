@@ -107,6 +107,10 @@ struct uavs3e_com_img_t {
 
 	/*for AQ*/
 	com_img_t  *list[2];
+	int        cucost_done;
+
+	double*    intra_satd;
+	double*    propagateCost;
 
 };
 

@@ -73,6 +73,15 @@ static void avs3_always_inline add_input_node(enc_ctrl_t *h, com_img_t *img, int
 	{
 		img->list[0] = list0;
 		img->list[1] = list1;
+		img->cucost_done = 0;
+
+		int num = ((img->height[0] + UNIT_SIZE - 1) / UNIT_SIZE) *((img->width[0] + UNIT_SIZE - 1) / UNIT_SIZE);
+
+		for (int i = 0; i < num; i++)
+		{
+			img->intra_satd[i] = 0.0;
+			img->propagateCost[i] = 0.0;
+		}
 	}
     node->b_ref    = bref;
     node->layer_id = layer; 
