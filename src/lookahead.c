@@ -321,6 +321,8 @@ static void loka_get_cu_cost(inter_search_t *pi, com_img_t *img_org, int bit_dep
 	num_ref[0] = (img_org->list[0] == NULL ? 0 : 1);
 	num_ref[1] = (img_org->list[1] == NULL ? 0 : 1);
 
+    int num = ((img_org->height[0] + UNIT_SIZE - 1) / UNIT_SIZE) *((img_org->width[0] + UNIT_SIZE - 1) / UNIT_SIZE);
+
 	int pre_ref_block_stride = ((pic_width + UNIT_SIZE - 1) / UNIT_SIZE);
 
 	for (int y = 0; y < pic_height - UNIT_SIZE + 1; y += UNIT_SIZE) {
@@ -358,8 +360,8 @@ static void loka_get_cu_cost(inter_search_t *pi, com_img_t *img_org, int bit_dep
 					if (cost < min_cost) {
 						min_cost = cost;
 						best_list = lidx;
-						best_mv[0] = mv[0];
-						best_mv[1] = mv[1];
+						best_mv[0] = mv[0] >> 2;
+						best_mv[1] = mv[1] >> 2;
 					}
 				}
 			}
@@ -395,8 +397,8 @@ static void loka_get_cu_cost(inter_search_t *pi, com_img_t *img_org, int bit_dep
 				 |  idx2    |     idx3  |
 				  ------------------------*/
 
-				int ref_pix_tl_x = x/ UNIT_SIZE + best_mv[0]; //top left position
-				int ref_pix_tl_y = y/ UNIT_SIZE + best_mv[1];
+				int ref_pix_tl_x = x + best_mv[0]; //top left position
+				int ref_pix_tl_y = y + best_mv[1];
 				int ref_pix_tr_x = ref_pix_tl_x + UNIT_SIZE;
 				int ref_pix_tr_y = ref_pix_tl_y;
 				int ref_pix_bl_x = ref_pix_tl_x;
@@ -411,6 +413,9 @@ static void loka_get_cu_cost(inter_search_t *pi, com_img_t *img_org, int bit_dep
 				double delata0_y = (ref_idx0_y * UNIT_SIZE + UNIT_SIZE) - ref_pix_tl_y;
 				double area0 = (delata0_x*delata0_y) / (UNIT_SIZE*UNIT_SIZE);
 
+                if (ref_idx0_y * pre_ref_block_stride + ref_idx0_x > num) {
+                    int a = 0;
+                }
 				ref_img->propagateCost[ref_idx0_y * pre_ref_block_stride + ref_idx0_x] += area0 * (min_icost - min_cost);
 
 				int ref_idx1_x = ref_idx0_x + 1;
